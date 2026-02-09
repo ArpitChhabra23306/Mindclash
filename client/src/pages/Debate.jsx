@@ -741,34 +741,36 @@ const Debate = () => {
                         )}
                     </div>
 
-                    {/* Reactions */}
-                    <div className="glass-card" style={{ padding: '16px' }}>
-                        <h3 style={{ fontWeight: '700', marginBottom: '12px' }}>⚡ React!</h3>
-                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
-                            {reactionEmojis.map((emoji) => (
-                                <motion.button
-                                    key={emoji}
-                                    onClick={() => handleReaction(emoji)}
-                                    style={{
-                                        display: 'flex',
-                                        alignItems: 'center',
-                                        gap: '8px',
-                                        padding: '8px 16px',
-                                        background: '#f5f5f5',
-                                        border: 'none',
-                                        borderRadius: '12px',
-                                        cursor: 'pointer',
-                                        fontSize: '16px'
-                                    }}
-                                    whileHover={{ scale: 1.05 }}
-                                    whileTap={{ scale: 0.95 }}
-                                >
-                                    <span>{emoji}</span>
-                                    <span style={{ fontWeight: '700', fontSize: '14px' }}>{reactions[emoji] || 0}</span>
-                                </motion.button>
-                            ))}
+                    {/* Reactions - Spectators Only */}
+                    {myRole === 'spectator' && (
+                        <div className="glass-card" style={{ padding: '16px' }}>
+                            <h3 style={{ fontWeight: '700', marginBottom: '12px' }}>⚡ React!</h3>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                                {reactionEmojis.map((emoji) => (
+                                    <motion.button
+                                        key={emoji}
+                                        onClick={() => handleReaction(emoji)}
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '8px',
+                                            padding: '8px 16px',
+                                            background: '#f5f5f5',
+                                            border: 'none',
+                                            borderRadius: '12px',
+                                            cursor: 'pointer',
+                                            fontSize: '16px'
+                                        }}
+                                        whileHover={{ scale: 1.05 }}
+                                        whileTap={{ scale: 0.95 }}
+                                    >
+                                        <span>{emoji}</span>
+                                        <span style={{ fontWeight: '700', fontSize: '14px' }}>{reactions[emoji] || 0}</span>
+                                    </motion.button>
+                                ))}
+                            </div>
                         </div>
-                    </div>
+                    )}
                 </div>
 
                 {/* Sidebar */}
@@ -819,40 +821,42 @@ const Debate = () => {
                         </div>
                     )}
 
-                    {/* Spectator Chat */}
-                    <div className="glass-card" style={{ padding: '16px' }}>
-                        <h3 style={{ fontWeight: '700', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                            👁️ Live Chat
-                            <span style={{ fontSize: '13px', fontWeight: '400', color: '#737373' }}>({spectatorCount} watching)</span>
-                        </h3>
+                    {/* Spectator Chat - Spectators Only */}
+                    {myRole === 'spectator' && (
+                        <div className="glass-card" style={{ padding: '16px' }}>
+                            <h3 style={{ fontWeight: '700', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                👁️ Live Chat
+                                <span style={{ fontSize: '13px', fontWeight: '400', color: '#737373' }}>({spectatorCount} watching)</span>
+                            </h3>
 
-                        <div style={{ height: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
-                            {spectatorChat.length > 0 ? (
-                                spectatorChat.map((msg, i) => (
-                                    <div key={i} style={{ padding: '8px 12px', background: '#f5f5f5', borderRadius: '8px', fontSize: '13px' }}>
-                                        <span style={{ fontWeight: '600', color: '#8b5cf6' }}>{msg.username}:</span> {msg.message}
-                                    </div>
-                                ))
-                            ) : (
-                                <div style={{ textAlign: 'center', padding: '16px', color: '#737373', fontSize: '13px' }}>No messages yet</div>
-                            )}
-                            <div ref={chatEndRef} />
-                        </div>
+                            <div style={{ height: '200px', overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '8px', marginBottom: '12px' }}>
+                                {spectatorChat.length > 0 ? (
+                                    spectatorChat.map((msg, i) => (
+                                        <div key={i} style={{ padding: '8px 12px', background: '#f5f5f5', borderRadius: '8px', fontSize: '13px' }}>
+                                            <span style={{ fontWeight: '600', color: '#8b5cf6' }}>{msg.username}:</span> {msg.message}
+                                        </div>
+                                    ))
+                                ) : (
+                                    <div style={{ textAlign: 'center', padding: '16px', color: '#737373', fontSize: '13px' }}>No messages yet</div>
+                                )}
+                                <div ref={chatEndRef} />
+                            </div>
 
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                            <input
-                                type="text"
-                                value={chatInput}
-                                onChange={(e) => setChatInput(e.target.value)}
-                                onKeyPress={(e) => e.key === 'Enter' && handleSendChat()}
-                                placeholder="Say something..."
-                                style={{ flex: 1, padding: '8px 12px', borderRadius: '8px', border: '1px solid #e5e5e5', fontSize: '13px' }}
-                            />
-                            <button onClick={handleSendChat} style={{ padding: '8px 12px', borderRadius: '8px', background: '#8b5cf6', color: '#fff', border: 'none', cursor: 'pointer' }}>
-                                <Send style={{ width: '16px', height: '16px' }} />
-                            </button>
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                                <input
+                                    type="text"
+                                    value={chatInput}
+                                    onChange={(e) => setChatInput(e.target.value)}
+                                    onKeyPress={(e) => e.key === 'Enter' && handleSendChat()}
+                                    placeholder="Say something..."
+                                    style={{ flex: 1, padding: '8px 12px', borderRadius: '8px', border: '1px solid #e5e5e5', fontSize: '13px' }}
+                                />
+                                <button onClick={handleSendChat} style={{ padding: '8px 12px', borderRadius: '8px', background: '#8b5cf6', color: '#fff', border: 'none', cursor: 'pointer' }}>
+                                    <Send style={{ width: '16px', height: '16px' }} />
+                                </button>
+                            </div>
                         </div>
-                    </div>
+                    )}
 
                     {/* Topic Info */}
                     <div className="glass-card" style={{ padding: '16px' }}>
