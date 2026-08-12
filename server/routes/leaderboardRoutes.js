@@ -1,5 +1,6 @@
 import express from 'express';
 import User from '../models/User.js';
+import { getCache, setCache } from '../config/redis.js';
 
 const router = express.Router();
 
@@ -12,6 +13,14 @@ router.get('/global', async (req, res) => {
     try {
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 50;
+        const cacheKey = `leaderboard:global:${page}:${limit}`;
+
+        // Check Redis cache first
+        const cachedData = await getCache(cacheKey);
+        if (cachedData) {
+            return res.json(cachedData);
+        }
+
         const skip = (page - 1) * limit;
 
         const users = await User.find({ totalDebates: { $gt: 0 } })
@@ -29,7 +38,7 @@ router.get('/global', async (req, res) => {
             winRate: user.totalDebates > 0 ? Math.round((user.wins / user.totalDebates) * 100) : 0,
         }));
 
-        res.json({
+        const responseData = {
             success: true,
             leaderboard: rankedUsers,
             pagination: {
@@ -37,7 +46,12 @@ router.get('/global', async (req, res) => {
                 totalPages: Math.ceil(total / limit),
                 totalUsers: total,
             },
-        });
+        };
+
+        // Cache in Redis for 5 minutes (300 seconds)
+        await setCache(cacheKey, responseData, 300);
+
+        res.json(responseData);
     } catch (error) {
         console.error('Get leaderboard error:', error);
         res.status(500).json({
@@ -54,11 +68,17 @@ router.get('/global', async (req, res) => {
  */
 router.get('/weekly', async (req, res) => {
     try {
+        const cacheKey = 'leaderboard:weekly';
+
+        // Check Redis cache first
+        const cachedData = await getCache(cacheKey);
+        if (cachedData) {
+            return res.json(cachedData);
+        }
+
         const oneWeekAgo = new Date();
         oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
 
-        // For now, use the same logic as global but could be enhanced
-        // to track weekly stats separately
         const users = await User.find({
             totalDebates: { $gt: 0 },
             lastLogin: { $gte: oneWeekAgo }
@@ -73,11 +93,16 @@ router.get('/weekly', async (req, res) => {
             winRate: user.totalDebates > 0 ? Math.round((user.wins / user.totalDebates) * 100) : 0,
         }));
 
-        res.json({
+        const responseData = {
             success: true,
             leaderboard: rankedUsers,
             period: 'weekly',
-        });
+        };
+
+        // Cache in Redis for 5 minutes
+        await setCache(cacheKey, responseData, 300);
+
+        res.json(responseData);
     } catch (error) {
         console.error('Get weekly leaderboard error:', error);
         res.status(500).json({

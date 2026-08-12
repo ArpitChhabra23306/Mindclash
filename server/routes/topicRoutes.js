@@ -2,6 +2,7 @@ import express from 'express';
 import Topic from '../models/Topic.js';
 import { protect } from '../middleware/authMiddleware.js';
 import openaiService from '../services/openaiService.js';
+import { getCache, setCache } from '../config/redis.js';
 
 const router = express.Router();
 
@@ -39,12 +40,17 @@ router.get('/', async (req, res) => {
  */
 router.get('/trending', async (req, res) => {
     try {
-        const topics = await Topic.getTrending(10);
+        const cacheKey = 'topics:trending';
+        const cached = await getCache(cacheKey);
+        if (cached) return res.json(cached);
 
-        res.json({
-            success: true,
-            topics,
-        });
+        const topics = await Topic.getTrending(10);
+        const responseData = { success: true, topics };
+
+        // Cache for 10 minutes (600s)
+        await setCache(cacheKey, responseData, 600);
+
+        res.json(responseData);
     } catch (error) {
         console.error('Get trending error:', error);
         res.status(500).json({ success: false, message: 'Server error' });
@@ -58,15 +64,21 @@ router.get('/trending', async (req, res) => {
  */
 router.get('/featured', async (req, res) => {
     try {
+        const cacheKey = 'topics:featured';
+        const cached = await getCache(cacheKey);
+        if (cached) return res.json(cached);
+
         const featured = await Topic.findOne({
             isFeatured: true,
             isActive: true,
         }).sort({ featuredAt: -1 });
 
-        res.json({
-            success: true,
-            topic: featured,
-        });
+        const responseData = { success: true, topic: featured };
+
+        // Cache for 1 hour (3600s)
+        await setCache(cacheKey, responseData, 3600);
+
+        res.json(responseData);
     } catch (error) {
         console.error('Get featured error:', error);
         res.status(500).json({ success: false, message: 'Server error' });

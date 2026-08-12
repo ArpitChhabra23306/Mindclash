@@ -26,3 +26,5 @@ dist-ssr
 # all env
 server/.env
 
+# Reference files
+files/ref/
