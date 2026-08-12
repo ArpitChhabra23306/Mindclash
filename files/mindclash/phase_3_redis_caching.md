@@ -1,9 +1,7 @@
-# Phase 3: Redis — Caching, Architecture & Scaling Strategy
+# Phase 3: Redis — Fundamentals, Caching & Line-by-Line Code Breakdown
 
 > **Why a dedicated phase for Redis?**
-> Redis is not just a library you import. It is a **separate server**, a separate data structure,
-> and a fundamentally different way of thinking about data access. Understanding it deeply
-> separates a mid-level developer from a senior one in any system design interview.
+> Redis is not just an npm package — it is a **standalone in-memory server**, a unique data store, and a fundamental building block of scalable system design. Understanding where Redis lives, how memory storage works, and tracing every line of Redis code separates mid-level engineers from senior ones.
 
 ---
 
@@ -11,363 +9,345 @@
 
 Redis stands for **Re**mote **Di**ctionary **S**erver.
 
-It is a data store that runs entirely in **RAM** (your server's working memory), not on disk.
+It is an open-source, ultra-fast key-value data store that keeps 100% of its data inside **RAM (Random Access Memory)** rather than writing it to disk.
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                    WHERE DATA LIVES                                  │
-│                                                                      │
-│  MongoDB (Disk):    📀  Persistent. Survives restarts. Slow reads.   │
-│                         ~50-200ms per query on large collections     │
-│                                                                      │
-│  Redis (RAM):       ⚡  Temporary. Lost on restart. Instant reads.   │
-│                         <1ms per key lookup                          │
-│                                                                      │
-│  Node.js RAM (Map): 🧠  Per-process. Fastest possible. No network.   │
-│                         <0.001ms — direct memory pointer lookup      │
-└─────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                            WHERE DATA LIVES                                 │
+│                                                                             │
+│  MongoDB Atlas (Disk): 📀 Persistent. Survives restarts. Slow reads.       │
+│                           ~50-200ms per query on large collections           │
+│                                                                             │
+│  Redis Cloud (RAM):    ⚡ Temporary. Lost on restart. Instant reads.         │
+│                           <1ms per key lookup                               │
+│                                                                             │
+│  Node.js RAM (Map):    🧠 Per-process memory. Fastest possible. No network. │
+│                           <0.001ms — direct memory pointer lookup           │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-**The Speed Hierarchy:**
-```
-Node.js RAM Map   → nanoseconds  (0.000001ms)
-Redis (RAM)       → <1ms         (1,000x slower than RAM map but 100x faster than disk)
-MongoDB (Disk)    → 50-200ms     (depends on collection size, indexes, query complexity)
-```
+### The Hardware Speed Hierarchy
 
-**The Key Insight:**
-Redis is not a replacement for MongoDB. MongoDB stores your data permanently.
-Redis is a **fast mirror** of the data that changes rarely but is read very frequently.
-
----
-
-## 2. Why MindClash Needs Redis
-
-### The Problem: Expensive MongoDB Queries on Public Routes
-
-Some routes are hit by EVERY user — logged in or not:
-
-```
-GET /api/leaderboard/global   → Opens the Leaderboard page
-GET /api/topics/trending      → Opens the Explore/Arena page
-GET /api/topics/featured      → Home page featured topic
-```
-
-What MongoDB has to do for `/api/leaderboard/global`:
-
-```javascript
-// This runs on EVERY leaderboard page load — by EVERY user:
-const users = await User.find({ totalDebates: { $gt: 0 } })
-    .sort({ reputation: -1, wins: -1 })  // Sort ALL qualifying users
-    .skip(skip)                           // Skip to page N
-    .limit(50)                            // Take 50
-    .select('username displayName avatar frame tier level reputation xp wins losses bestStreak');
-
-const total = await User.countDocuments({ totalDebates: { $gt: 0 } }); // Count all
-```
-
-**Without Redis:** 100 users open the leaderboard → 200 MongoDB operations (100 sort + 100 count).
-**With Redis:** 100 users open the leaderboard → 1 MongoDB operation + 99 Redis reads in <1ms.
-
----
-
-## 3. Redis Connection Setup (`server/config/redis.js`)
-
-The entire Redis setup lives in one file:
-
-```javascript
-import Redis from 'ioredis';   // 'ioredis' is the Node.js Redis client library
-
-let redis = null;  // Module-level variable — shared across the entire server process
-
-const connectRedis = () => {
-    try {
-        if (process.env.REDIS_URL) {
-            // Create Redis client instance
-            redis = new Redis(process.env.REDIS_URL, {
-                maxRetriesPerRequest: 3,      // If a command fails, retry 3 times
-                retryDelayOnFailover: 100,    // Wait 100ms between retries
-                lazyConnect: true,            // Don't connect immediately — wait for .connect()
-            });
-
-            // Event listeners for monitoring:
-            redis.on('connect', () => console.log('✅ Redis Connected'));
-            redis.on('error', (err) => console.error('❌ Redis Error:', err.message));
-
-            // Initiate connection:
-            redis.connect().catch(console.error);
-
-        } else {
-            // No REDIS_URL set in .env → skip Redis entirely
-            console.log('⚠️ Redis URL not configured, using in-memory fallback');
-        }
-    } catch (error) {
-        console.error('❌ Redis Connection Error:', error.message);
-    }
-
-    return redis;
-};
-```
-
-**Why `lazyConnect: true`?**
-Without it, `new Redis(url)` immediately tries to connect and throws if it fails, potentially crashing the server boot. With `lazyConnect`, the connection is deferred until `.connect()` is explicitly called, giving the error handler time to register first.
-
-**Why `let redis = null` at the top?**
-This is a module-level singleton. Every file that imports from `redis.js` shares the SAME Redis client instance. You don't create a new connection per request — one persistent TCP connection handles all commands.
-
----
-
-## 4. The 3 Helper Functions — Your Redis API
-
-These 3 exported functions are what every route file uses:
-
-### `getCache(key)` — Try to Read From Redis
-
-```javascript
-export const getCache = async (key) => {
-    // Guard 1: Redis not configured → return null (caller falls to MongoDB)
-    if (!redis) return null;
-
-    try {
-        const data = await redis.get(key);
-        // redis.get() returns:
-        //   - A string (the stored value)   → if key EXISTS in Redis
-        //   - null                          → if key DOESN'T EXIST or has EXPIRED
-
-        return data ? JSON.parse(data) : null;
-        // JSON.parse() converts the string back to a JavaScript object
-        // e.g. '{"success":true,"leaderboard":[...]}' → { success: true, leaderboard: [...] }
-
-    } catch (err) {
-        // Guard 2: Redis error (e.g. network blip) → return null (fall through to MongoDB)
-        console.error('Redis getCache error:', err.message);
-        return null;
-    }
-};
-```
-
-**The double-null safety:** If Redis is unconfigured OR if Redis throws an error,
-`getCache` always returns `null`. Routes check `if (cachedData)` — null = falsy = query MongoDB.
-This means Redis going down NEVER causes your app to return an error to users.
-
----
-
-### `setCache(key, value, ttlSeconds)` — Write to Redis With Expiry
-
-```javascript
-export const setCache = async (key, value, ttlSeconds = 300) => {
-    if (!redis) return;
-
-    try {
-        await redis.set(
-            key,                    // The cache key (human-readable string)
-            JSON.stringify(value),  // Must serialize: Redis stores strings, not objects
-            'EX',                   // 'EX' flag = EXpire after N seconds
-            ttlSeconds              // e.g. 300 = auto-deleted from Redis in 5 minutes
-        );
-    } catch (err) {
-        console.error('Redis setCache error:', err.message);
-        // Silent failure: if Redis can't store, the data still returned to user from MongoDB
-    }
-};
-```
-
-**Why `JSON.stringify()`?**
-Redis is a key-value store where values must be strings (or binary).
-JavaScript objects cannot be stored directly. `JSON.stringify()` converts:
-```
-{ success: true, leaderboard: [...] } → '{"success":true,"leaderboard":[...]}'
-```
-And `JSON.parse()` on read converts it back.
-
-**What is TTL (Time-To-Live)?**
-TTL is the number of seconds before Redis automatically deletes the key.
-After TTL expires, the next request gets a "cache miss" (null) and re-fetches from MongoDB.
-This ensures the cache never shows stale data for longer than the TTL.
-
----
-
-### `delCache(key)` — Invalidate a Cache Entry
-
-```javascript
-export const delCache = async (key) => {
-    if (!redis) return;
-    try {
-        await redis.del(key);     // Immediately removes the key from Redis
-    } catch (err) {
-        console.error('Redis delCache error:', err.message);
-    }
-};
-```
-
-**When is this used?**
-When data changes (a new debate is created, XP is awarded), the cached leaderboard
-becomes stale. Calling `delCache('leaderboard:global:1:50')` forces the next request
-to re-fetch fresh data from MongoDB and re-cache it.
-*(In MindClash, cache invalidation relies on TTL expiry — `delCache` is available for future use.)*
-
----
-
-## 5. The Cache-Aside Pattern (How Routes Use Redis)
-
-Every cached route follows the same exact 4-step pattern. This is called **Cache-Aside**:
-
-```
-Step 1: Check Redis first      → Cache HIT  → return immediately
-                                ↓
-                               Cache MISS
-                                ↓
-Step 2: Query MongoDB          → Get fresh data
-                                ↓
-Step 3: Store result in Redis  → setCache(key, data, ttl)
-                                ↓
-Step 4: Return data to user    → res.json(data)
-```
-
-### Exact Implementation in `leaderboardRoutes.js`:
-
-```javascript
-import { getCache, setCache } from '../config/redis.js';
-
-router.get('/global', async (req, res) => {
-    const page  = parseInt(req.query.page)  || 1;
-    const limit = parseInt(req.query.limit) || 50;
-
-    // Cache key includes page + limit so each paginated view is cached separately
-    const cacheKey = `leaderboard:global:${page}:${limit}`;
-
-    // ─── STEP 1: Check Redis ───────────────────────────────────────────
-    const cachedData = await getCache(cacheKey);
-    if (cachedData) {
-        return res.json(cachedData);
-        // ↑ Returns HERE if cached. MongoDB never queried. ~0.5ms response time.
-    }
-
-    // ─── STEP 2: Cache miss → MongoDB query ───────────────────────────
-    const skip  = (page - 1) * limit;
-    const users = await User.find({ totalDebates: { $gt: 0 } })
-        .sort({ reputation: -1, wins: -1 })
-        .skip(skip)
-        .limit(limit)
-        .select('username displayName avatar frame tier level reputation xp wins losses bestStreak');
-
-    const total      = await User.countDocuments({ totalDebates: { $gt: 0 } });
-    const rankedUsers = users.map((user, index) => ({
-        rank: skip + index + 1,
-        ...user.toObject(),
-        winRate: user.totalDebates > 0 ? Math.round((user.wins / user.totalDebates) * 100) : 0,
-    }));
-
-    const responseData = {
-        success: true,
-        leaderboard: rankedUsers,
-        pagination: {
-            currentPage: page,
-            totalPages: Math.ceil(total / limit),
-            totalUsers: total,
-        },
-    };
-
-    // ─── STEP 3: Store in Redis for 5 minutes ─────────────────────────
-    await setCache(cacheKey, responseData, 300);
-
-    // ─── STEP 4: Return fresh data ────────────────────────────────────
-    res.json(responseData);
-});
-```
-
----
-
-## 6. All 4 Endpoints Using Redis Cache in MindClash
-
-| File | Route | Cache Key | TTL | Why This TTL? |
-|---|---|---|---|---|
-| [`leaderboardRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/leaderboardRoutes.js) | `GET /api/leaderboard/global` | `leaderboard:global:{page}:{limit}` | **300s (5 min)** | Leaderboard changes when debates end; 5 min is fresh enough |
-| [`leaderboardRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/leaderboardRoutes.js) | `GET /api/leaderboard/weekly` | `leaderboard:weekly` | **300s (5 min)** | Weekly stats, medium staleness acceptable |
-| [`topicRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/topicRoutes.js) | `GET /api/topics/trending` | `topics:trending` | **600s (10 min)** | Trending changes slowly; 10 min is fine |
-| [`topicRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/topicRoutes.js) | `GET /api/topics/featured` | `topics:featured` | **3600s (1 hour)** | Featured topic is set once per day — 1 hr staleness fine |
-
----
-
-## 7. What Redis Does NOT Do in MindClash (And Why)
-
-| Redis Pattern | Used? | Why Not? | Future Plan |
+| Storage Tier | Physical Technology | Analogy | Read Latency |
 |---|---|---|---|
-| **Response Cache** | ✅ Active | — | Already implemented |
-| **Session Storage** | ❌ No | JWT is stateless — no session object needed on server | Never needed unless switching to session auth |
-| **Token Blacklist** | ❌ No | Would require Redis for JWT revocation; TTL expiry accepted instead | Add if ban-instant-kick needed |
-| **Pub/Sub** | ❌ Not yet | Single server — Socket.io in-memory rooms work perfectly | Add `@socket.io/redis-adapter` when multi-server |
-| **BullMQ Job Queue** | ❌ Not yet | `finishDebate()` runs synchronously in socket handler; acceptable for MVP | Add when AI job retry + background processing needed |
+| **Node.js RAM (`Map`)** | Server CPU Cache / RAM | A sticky note attached to your monitor | **<0.001ms** (Nanoseconds) |
+| **Redis (In-Memory DB)** | Server RAM Electrical Chips | A notebook sitting on your desk | **<1ms** (Microseconds) |
+| **MongoDB (Primary DB)** | SSD / Flash / Disk Storage | Walking to a library 5 miles away | **50ms – 200ms** (Milliseconds) |
 
 ---
 
-## 8. Graceful Degradation — Why Your App Never Crashes if Redis Goes Down
+## 2. Where Does Redis Live? (Client PC vs Server / Cloud)
 
-Every helper function (`getCache`, `setCache`, `delCache`) has this safety:
+* ❌ **NOT on the Client's Laptop / Browser:** Browser storage like `localStorage` or `sessionStorage` lives strictly on one user's machine. User A cannot see User B's `localStorage`.
+* ✅ **On the Server / Cloud Infrastructure:** Redis runs as a separate database service on your **backend cloud infrastructure** (e.g. Redis Cloud, AWS ElastiCache, or Docker).
+* **Why this matters:** Because Redis lives on the server side, **all 100,000 users share the exact same Redis instance**!
+
+```
+[User A's Browser] ── (Axios GET /leaderboard) ──┐
+                                                 │
+[User B's Browser] ── (Axios GET /leaderboard) ──┼──► [Node.js Express Server] ──► [Redis Cloud (RAM)]
+                                                 │                                      │
+[User C's Browser] ── (Axios GET /leaderboard) ──┘                                (Returns Leaderboard
+                                                                                     JSON in <1ms)
+```
+
+---
+
+## 3. What is `REDIS_URL`?
+
+`REDIS_URL` is the URI connection string (address + port + credentials) that allows your Node.js Express server to establish a secure TCP network pipeline to your Redis server.
+
+### Anatomy of a `REDIS_URL`:
+```
+redis://default:MySecretPassword123@redis-12345.c1.us-east-1.ec2.redns.redis-cloud.com:12345
+│       │       │                      │                                                  │
+└Protocol  User  └──────Password───────┴──────────────Host Domain Name─────────────────────┴Port
+```
+
+* **Protocol:** `redis://` (or `rediss://` for TLS encrypted connections).
+* **Credentials:** `username` and `password` for authentication.
+* **Host & Port:** Tells `ioredis` where on the internet your Redis server is running.
+
+---
+
+## 4. Line-by-Line Breakdown: Connection & Helpers (`server/config/redis.js`)
+
+Below is the complete code of [`server/config/redis.js`](file:///e:/Projects/Mindclash-main/server/config/redis.js) with a line-by-line explanation:
 
 ```javascript
-if (!redis) return null;   // Redis not configured → skip
-try { ... }
-catch { return null; }     // Redis error → skip, fall to MongoDB
+ 1: import Redis from 'ioredis';
+ 2: 
+ 3: let redis = null;
+ 4: 
+ 5: const connectRedis = () => {
+ 6:     try {
+ 7:         if (process.env.REDIS_URL) {
+ 8:             redis = new Redis(process.env.REDIS_URL, {
+ 9:                 maxRetriesPerRequest: 3,
+10:                 retryDelayOnFailover: 100,
+11:                 lazyConnect: true,
+12:             });
+13: 
+14:             redis.on('connect', () => {
+15:                 console.log('✅ Redis Connected');
+16:             });
+17: 
+18:             redis.on('error', (err) => {
+19:                 console.error('❌ Redis Error:', err.message);
+20:             });
+21: 
+22:             redis.connect().catch(console.error);
+23:         } else {
+24:             console.log('⚠️ Redis URL not configured, using in-memory fallback');
+25:         }
+26:     } catch (error) {
+27:         console.error('❌ Redis Connection Error:', error.message);
+28:     }
+29: 
+30:     return redis;
+31: };
+32: 
+33: /**
+34:  * Get cached JSON object from Redis safely
+35:  */
+36: export const getCache = async (key) => {
+37:     if (!redis) return null;
+38:     try {
+39:         const data = await redis.get(key);
+40:         return data ? JSON.parse(data) : null;
+41:     } catch (err) {
+42:         console.error('Redis getCache error:', err.message);
+43:         return null;
+44:     }
+45: };
+46: 
+47: /**
+48:  * Set JSON object in Redis with expiration (TTL in seconds)
+49:  */
+50: export const setCache = async (key, value, ttlSeconds = 300) => {
+51:     if (!redis) return;
+52:     try {
+53:         await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds);
+54:     } catch (err) {
+55:         console.error('Redis setCache error:', err.message);
+56:     }
+57: };
+58: 
+59: /**
+60:  * Delete cached key from Redis
+61:  */
+62: export const delCache = async (key) => {
+63:     if (!redis) return;
+64:     try {
+65:         await redis.del(key);
+66:     } catch (err) {
+67:         console.error('Redis delCache error:', err.message);
+68:     }
+69: };
+70: 
+71: export { redis, connectRedis };
 ```
 
-**The consequence of this design:**
+### Detailed Line-by-Line Explanation of `redis.js`:
 
-```
-Normal flow:    Request → Redis HIT  → Response (fast)
-Cache miss:     Request → Redis MISS → MongoDB → Redis store → Response
-Redis down:     Request → null       → MongoDB              → Response (normal speed)
-Redis missing:  Request → null       → MongoDB              → Response (normal speed)
-```
-
-The user never sees an error. They just get a slightly slower response when Redis is unavailable.
-This is called **Graceful Degradation** — the system degrades gracefully from fast to normal,
-never from normal to broken.
+* **Line 1:** `import Redis from 'ioredis';` — Imports the `ioredis` client, the standard robust Redis driver for Node.js.
+* **Line 3:** `let redis = null;` — Declares a module-scoped variable `redis`. Starts as `null` so functions know if Redis is initialized or not.
+* **Line 5-7:** `const connectRedis = () => { if (process.env.REDIS_URL) {` — Checks if `REDIS_URL` exists in `.env`. If absent, skips initialization safely.
+* **Lines 8-12:** `redis = new Redis(process.env.REDIS_URL, { maxRetriesPerRequest: 3, retryDelayOnFailover: 100, lazyConnect: true });`
+  * `maxRetriesPerRequest: 3`: If Redis doesn't respond immediately, it retries up to 3 times before returning an error.
+  * `retryDelayOnFailover: 100`: Waits 100ms between retry attempts.
+  * `lazyConnect: true`: Defers connecting until `.connect()` is called explicitly, preventing unhandled crash loops on startup.
+* **Lines 14-20:** Sets up event listeners (`redis.on('connect')` and `redis.on('error')`) to log status cleanly to the server console.
+* **Line 22:** `redis.connect().catch(console.error);` — Triggers the asynchronous connection to Redis Cloud.
+* **Lines 24-28:** Logs warning if `REDIS_URL` is omitted and catches initialization errors so Express boots smoothly.
+* **Line 36-45 (`getCache`):**
+  * `if (!redis) return null;` — If Redis isn't connected, returns `null` immediately so the caller falls through to MongoDB.
+  * `const data = await redis.get(key);` — Asynchronously fetches the string stored at `key` from Redis RAM.
+  * `return data ? JSON.parse(data) : null;` — Redis stores values as strings. `JSON.parse` converts it back into a native JavaScript object.
+  * `catch (err) { return null; }` — If a network error occurs, returns `null` instead of throwing an unhandled exception.
+* **Line 50-57 (`setCache`):**
+  * `await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds);`
+  * `JSON.stringify(value)`: Converts the JavaScript object into a JSON string.
+  * `'EX'`: Tells Redis to apply an expiration timer.
+  * `ttlSeconds`: Specifies the number of seconds until Redis automatically purges the key (e.g. 300s = 5 mins).
+* **Line 62-69 (`delCache`):** Executes `redis.del(key)` to manually remove a cached key when data is updated.
 
 ---
 
-## 9. What Redis Is NOT (Common Misconceptions)
+## 5. Line-by-Line Breakdown: Server Boot Connection (`server/index.js`)
 
-| Misconception | Reality |
-|---|---|
-| "Redis replaces MongoDB" | ❌ Redis stores copies of popular data temporarily. MongoDB stores everything permanently. |
-| "Redis Pub/Sub is what we use for Socket.io" | ❌ MindClash uses Socket.io's built-in rooms. Pub/Sub is only needed for multi-server deployments. |
-| "Redis Queue is what our matchmaking uses" | ❌ Matchmaking uses a JavaScript `Map` in Node.js RAM — no Redis involved. |
-| "Redis needs a database schema" | ❌ Redis is schemaless. You just store string keys → string values. |
-| "Redis data is permanent" | ❌ Redis is in-memory. Data is lost on Redis restart. Use TTL intentionally. |
+In [`server/index.js`](file:///e:/Projects/Mindclash-main/server/index.js):
 
----
-
-## 10. Interview Q&A for Redis
-
-**Q: Why did you add Redis to MindClash?**
-> A: The Leaderboard and Trending Topics endpoints perform expensive MongoDB aggregations — scanning and sorting thousands of user documents on every request. With Redis caching and a 5-minute TTL, the first request populates the cache and all subsequent requests return in under 1ms without hitting MongoDB at all, reducing database read load by approximately 80%.
-
-**Q: What happens if Redis goes down?**
-> A: Every Redis helper function wraps operations in a `try/catch` and checks `if (!redis)` before executing. If Redis is unconfigured or throws an error, the functions return `null`, causing routes to fall through to normal MongoDB queries. Users see no errors — just slightly slower response times. This is Graceful Degradation.
-
-**Q: Why don't you use Redis for the matchmaking queue?**
-> A: The matchmaking queue is stored in a JavaScript `Map` in Node.js process memory, which accesses data in nanoseconds — three orders of magnitude faster than even Redis. Since MindClash currently runs on a single server instance, in-memory is strictly superior. Redis queues become necessary only when scaling to multiple server instances where each instance has isolated memory.
-
-**Q: Why no Redis Pub/Sub for Socket.io?**
-> A: Socket.io's built-in rooms already synchronize events between all sockets connected to a single server in microseconds with zero network overhead. Redis Pub/Sub is the scaling upgrade path — attaching the `@socket.io/redis-adapter` allows events to fan out across multiple Node.js instances. The architecture was deliberately designed so this can be added with zero changes to existing socket event handlers.
-
-**Q: What TTL did you choose and why?**
-> A: Leaderboards use 5 minutes (300s) because debate results that update rankings are processed at most every few minutes. Trending topics use 10 minutes because trending velocity changes slowly. The featured topic uses 1 hour because it's set manually once per day. Shorter TTLs would waste the caching benefit; longer TTLs would show stale data. TTLs were chosen by balancing data freshness against database load.
-
----
-
-## 11. Quick Reference — Redis in MindClash
-
-| File | Role |
-|---|---|
-| [`server/config/redis.js`](file:///e:/Projects/Mindclash-main/server/config/redis.js) | Connection + `getCache` / `setCache` / `delCache` helpers |
-| [`server/routes/leaderboardRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/leaderboardRoutes.js) | Caches global + weekly leaderboard (TTL: 5 min) |
-| [`server/routes/topicRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/topicRoutes.js) | Caches trending + featured topics (TTL: 10 min / 1 hr) |
-| [`server/index.js`](file:///e:/Projects/Mindclash-main/server/index.js) | Calls `connectRedis()` on boot |
-
-**Environment Variable:**
-```env
-REDIS_URL=redis://default:password@redis-12345.redis-cloud.com:12345
-# Leave empty → Redis disabled, app works normally using MongoDB only
+```javascript
+14: import { connectRedis } from './config/redis.js';
+...
+56: connectRedis();
 ```
+
+* **Line 14:** Imports `connectRedis` from configuration.
+* **Line 56:** Invokes `connectRedis()` during server startup right alongside MongoDB (`connectDB()`), opening the Redis TCP pipeline before routes start accepting traffic.
+
+---
+
+## 6. Line-by-Line Breakdown: Leaderboard Caching (`server/routes/leaderboardRoutes.js`)
+
+Below is the exact implementation in [`server/routes/leaderboardRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/leaderboardRoutes.js) for Global & Weekly Leaderboards:
+
+### 6.1 Global Leaderboard (`GET /api/leaderboard/global`)
+
+```javascript
+12: router.get('/global', async (req, res) => {
+13:     try {
+14:         const page = parseInt(req.query.page) || 1;
+15:         const limit = parseInt(req.query.limit) || 50;
+16:         const cacheKey = `leaderboard:global:${page}:${limit}`;
+17: 
+18:         // Check Redis cache first
+19:         const cachedData = await getCache(cacheKey);
+20:         if (cachedData) {
+21:             return res.json(cachedData);
+22:         }
+23: 
+24:         const skip = (page - 1) * limit;
+25:         const users = await User.find({ totalDebates: { $gt: 0 } })
+26:             .sort({ reputation: -1, wins: -1 })
+27:             .skip(skip)
+28:             .limit(limit)
+29:             .select('username displayName avatar frame tier level reputation xp wins losses totalDebates bestStreak');
+30: 
+31:         const total = await User.countDocuments({ totalDebates: { $gt: 0 } });
+...
+51:         // Cache in Redis for 5 minutes (300 seconds)
+52:         await setCache(cacheKey, responseData, 300);
+53: 
+54:         res.json(responseData);
+```
+
+#### Line-by-Line Walkthrough:
+* **Line 14-15:** Extracts `page` and `limit` from URL query parameters (`req.query`), defaulting to page 1 and 50 items.
+* **Line 16:** Constructs a unique dynamic key: `leaderboard:global:1:50`. Each page gets its own isolated cache key in Redis!
+* **Line 19-22:** Calls `await getCache(cacheKey)`. If data exists in Redis, `if (cachedData)` evaluates to `true` and returns the JSON payload **immediately** (`res.json(cachedData)`). The MongoDB queries on lines 25-32 are completely skipped, responding in **<1ms**.
+* **Lines 24-49:** On a cache miss (or if Redis is disabled), the server executes the heavy MongoDB `User.find()` aggregation, sorts users by `reputation` and `wins`, calculates `winRate`, and constructs `responseData`.
+* **Line 52:** `await setCache(cacheKey, responseData, 300);` — Saves `responseData` into Redis RAM under `leaderboard:global:1:50` with an expiration timer (`TTL`) of 300 seconds (5 minutes).
+* **Line 54:** Sends response to the original user.
+
+---
+
+### 6.2 Weekly Leaderboard (`GET /api/leaderboard/weekly`)
+
+```javascript
+69: router.get('/weekly', async (req, res) => {
+70:     try {
+71:         const cacheKey = 'leaderboard:weekly';
+72: 
+73:         // Check Redis cache first
+74:         const cachedData = await getCache(cacheKey);
+75:         if (cachedData) {
+76:             return res.json(cachedData);
+77:         }
+...
+82:         const users = await User.find({ ... })
+...
+95:         // Cache in Redis for 5 minutes
+96:         await setCache(cacheKey, responseData, 300);
+97: 
+98:         res.json(responseData);
+```
+
+#### Line-by-Line Walkthrough:
+* **Line 71:** Uses static key `'leaderboard:weekly'`.
+* **Line 74-77:** Checks Redis cache. On HIT → returns instantly.
+* **Line 82-94:** On MISS → executes 7-day active user filter query on MongoDB.
+* **Line 96:** Saves result in Redis with a 5-minute TTL (`300s`).
+
+---
+
+## 7. Line-by-Line Breakdown: Topics Caching (`server/routes/topicRoutes.js`)
+
+Below is the exact implementation in [`server/routes/topicRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/topicRoutes.js):
+
+### 7.1 Trending Topics (`GET /api/topics/trending`)
+
+```javascript
+41: router.get('/trending', async (req, res) => {
+42:     try {
+43:         const cacheKey = 'topics:trending';
+44:         const cached = await getCache(cacheKey);
+45:         if (cached) return res.json(cached);
+46: 
+47:         const topics = await Topic.getTrending(10);
+48:         const responseData = { success: true, topics };
+49: 
+50:         // Cache for 10 minutes (600s)
+51:         await setCache(cacheKey, responseData, 600);
+52: 
+53:         res.json(responseData);
+```
+
+#### Line-by-Line Walkthrough:
+* **Line 43-45:** Key `'topics:trending'`. If cached, returns immediately.
+* **Line 47:** On cache miss, queries `Topic.getTrending(10)` from MongoDB.
+* **Line 51:** `await setCache(cacheKey, responseData, 600);` — Caches result for **600 seconds (10 minutes)** since trending topic algorithms do not need to update every second.
+
+---
+
+### 7.2 Featured Topic of the Day (`GET /api/topics/featured`)
+
+```javascript
+65: router.get('/featured', async (req, res) => {
+66:     try {
+67:         const cacheKey = 'topics:featured';
+68:         const cached = await getCache(cacheKey);
+69:         if (cached) return res.json(cached);
+70: 
+71:         const featured = await Topic.findOne({ isFeatured: true, isActive: true }).sort({ featuredAt: -1 });
+72:         const responseData = { success: true, topic: featured };
+73: 
+74:         // Cache for 1 hour (3600s)
+75:         await setCache(cacheKey, responseData, 3600);
+76: 
+77:         res.json(responseData);
+```
+
+#### Line-by-Line Walkthrough:
+* **Line 67-69:** Key `'topics:featured'`. If cached, returns immediately.
+* **Line 71:** On cache miss, queries MongoDB for the featured topic document.
+* **Line 75:** `await setCache(cacheKey, responseData, 3600);` — Caches result for **3600 seconds (1 hour)** because the featured topic changes only once per day.
+
+---
+
+## 8. Summary Table of All Redis Code in MindClash
+
+| File | Exact Line Numbers | Redis Function Used | Key Name | TTL |
+|---|---|---|---|---|
+| [`server/config/redis.js`](file:///e:/Projects/Mindclash-main/server/config/redis.js) | L5–31 | `connectRedis()` | — | — |
+| [`server/config/redis.js`](file:///e:/Projects/Mindclash-main/server/config/redis.js) | L36–45 | `getCache(key)` | Dynamic | — |
+| [`server/config/redis.js`](file:///e:/Projects/Mindclash-main/server/config/redis.js) | L50–57 | `setCache(key, val, ttl)` | Dynamic | Custom |
+| [`server/config/redis.js`](file:///e:/Projects/Mindclash-main/server/config/redis.js) | L62–69 | `delCache(key)` | Dynamic | — |
+| [`server/index.js`](file:///e:/Projects/Mindclash-main/server/index.js) | L56 | `connectRedis()` boot call | — | — |
+| [`server/routes/leaderboardRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/leaderboardRoutes.js) | L16–52 | `getCache`, `setCache` | `leaderboard:global:{page}:{limit}` | 300s (5m) |
+| [`server/routes/leaderboardRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/leaderboardRoutes.js) | L71–96 | `getCache`, `setCache` | `leaderboard:weekly` | 300s (5m) |
+| [`server/routes/topicRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/topicRoutes.js) | L43–51 | `getCache`, `setCache` | `topics:trending` | 600s (10m) |
+| [`server/routes/topicRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/topicRoutes.js) | L67–75 | `getCache`, `setCache` | `topics:featured` | 3600s (1h) |
+
+---
+
+## 9. Interview Code Tracing Question 🎯
+
+**Q: Walk me through the exact line execution when a user requests `GET /api/leaderboard/global` for the first time vs the second time.**
+
+> **First Request (Cache Miss):**
+> 1. Line 16 constructs key `leaderboard:global:1:50`.
+> 2. Line 19 calls `getCache()`, executing `redis.get('leaderboard:global:1:50')`.
+> 3. Key does not exist in Redis, so `getCache()` returns `null`. `if (cachedData)` evaluates to `false`.
+> 4. Lines 25-49 execute the heavy MongoDB `User.find()` query, sort documents, and format `responseData`.
+> 5. Line 52 calls `setCache()`, stringifying `responseData` and setting it in Redis RAM with `TTL: 300s`.
+> 6. Line 54 sends JSON to the client (~150ms total).
+
+> **Second Request (Cache Hit within 5 minutes):**
+> 1. Line 16 constructs key `leaderboard:global:1:50`.
+> 2. Line 19 calls `getCache()`, executing `redis.get('leaderboard:global:1:50')`.
+> 3. Key exists in Redis RAM! `getCache()` returns the `JSON.parse()` object.
+> 4. Line 20 `if (cachedData)` evaluates to `true`.
+> 5. Line 21 returns `res.json(cachedData)` immediately.
+> 6. Lines 24-54 are **never reached**. MongoDB is not queried. Response arrives in **<1ms**.
