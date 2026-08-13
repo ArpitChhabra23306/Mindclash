@@ -1,12 +1,12 @@
-# Phase 3: Redis — Fundamentals, Architecture & Complete Code Breakdown
+# Phase 3: Redis — Fundamentals, Architecture & Heavily Commented Code Breakdown
 
-> **Goal:** After reading this, you will be able to explain every single line of Redis code in MindClash, trace the exact flow of data through memory and disk, defend the trade-offs in system design interviews, and understand the master skeleton architecture from browser to server to Redis to MongoDB.
+> **Goal:** After reading this document, you should understand every single line of Redis code in MindClash. Every code block is packed with line-by-line inline comments explaining the exact inputs, outputs, error handles, and memory behavior.
 
 ---
 
 ## 1. The Big Picture: All Files & Endpoints Using Redis
 
-Redis operations in MindClash are centralized in a configuration module and consumed by two public REST route controllers:
+Redis operations in MindClash are centralized in a single configuration module (`server/config/redis.js`) and consumed by public REST route controllers:
 
 ```
                                   ┌────────────────────────────────────────────────────────┐
@@ -49,43 +49,34 @@ Redis operations in MindClash are centralized in a configuration module and cons
 ## 2. Fundamentals: What Is Redis & Where Does It Live?
 
 ### 2.1 What Is Redis?
-Redis stands for **Re**mote **Di**ctionary **S**erver. It is an open-source, in-memory data structure store used as a database, cache, message broker, and streaming engine.
-
-Unlike traditional databases (like MongoDB or PostgreSQL) that store data on **magnetic/SSD hard drives**, Redis stores **100% of its data directly in RAM (Random Access Memory)**.
-
-### 2.2 Memory & Hardware Speed Hierarchy
-
-To understand why Redis is so fast, we must look at physical computer hardware:
+Redis stands for **Re**mote **Di**ctionary **S**erver. It is an open-source, ultra-fast key-value data store that keeps 100% of its data inside **RAM (Random Access Memory)** rather than writing it to disk.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                       HARDWARE ACCESS SPEED HIERARCHY                       │
+│                            WHERE DATA LIVES                                 │
 │                                                                             │
-│  Node.js RAM (Process Memory): 🧠 CPU Cache / Server RAM                    │
-│                                   Latency: <0.001ms (Nanoseconds)           │
-│                                   Scope: Single process, local to server    │
+│  MongoDB Atlas (Disk): 📀 Persistent. Survives restarts. Slow reads.       │
+│                           ~50-200ms per query on large collections           │
 │                                                                             │
-│  Redis Cloud (RAM Database):   ⚡ Dedicated RAM Chips                       │
-│                                   Latency: <1ms (Microseconds)              │
-│                                   Scope: Shared across all server nodes     │
+│  Redis Cloud (RAM):    ⚡ Temporary. Lost on restart. Instant reads.         │
+│                           <1ms per key lookup                               │
 │                                                                             │
-│  MongoDB Atlas (Primary DB):   📀 Solid State Disk (SSD / NVMe)            │
-│                                   Latency: 50ms – 200ms (Milliseconds)      │
-│                                   Scope: Permanent disk storage             │
+│  Node.js RAM (Map):    🧠 Per-process memory. Fastest possible. No network. │
+│                           <0.001ms — direct memory pointer lookup           │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-| Layer | Physical Medium | Read Latency | Survives Server Restart? | Shared Across Multiple Servers? |
-|---|---|---|---|---|
-| **Node.js `Map`** | Server Process RAM | `<0.001ms` | ❌ No (Wiped on restart) | ❌ No (Isolated to 1 Node process) |
-| **Redis** | Server RAM Chips | `<1ms` | ⚠️ Optional (Persistence available) | ✅ **Yes** (Centralized cache) |
-| **MongoDB** | NVMe SSD / Disk | `50ms – 200ms` | ✅ **Yes** (Permanent storage) | ✅ **Yes** (Primary Database) |
+### The Hardware Speed Hierarchy
+
+| Storage Tier | Physical Technology | Analogy | Read Latency |
+|---|---|---|---|
+| **Node.js RAM (`Map`)** | Server CPU Cache / RAM | A sticky note attached to your monitor | **<0.001ms** (Nanoseconds) |
+| **Redis (In-Memory DB)** | Server RAM Electrical Chips | A notebook sitting on your desk | **<1ms** (Microseconds) |
+| **MongoDB (Primary DB)** | SSD / Flash / Disk Storage | Walking to a library 5 miles away | **50ms – 200ms** (Milliseconds) |
 
 ---
 
 ## 3. Demystifying Locations: Client PC vs Node.js vs Redis Cloud
-
-A critical architectural distinction to understand for interviews:
 
 ```
   ┌─────────────────────────────┐
@@ -115,14 +106,14 @@ A critical architectural distinction to understand for interviews:
 ```
 
 1. **Client PC (Browser):** Holds `localStorage`, `sessionStorage`, and React state. This is **private per user**. User A cannot read User B's `localStorage`.
-2. **Node.js RAM (Express Server):** Holds local variables, JavaScript `Map` objects (`matchmakingQueue`, `activeDebates`). Access is instantaneous (<0.001ms), but data is lost if the Node process restarts, and data cannot be shared if you spin up Server 2.
-3. **Redis Server (Cloud / Infrastructure):** Runs as a independent backend server process. It is **shared across all backend servers and accessible to all users**, while operating at near-RAM speed (<1ms).
+2. **Node.js RAM (Express Server):** Holds local variables, JavaScript `Map` objects (`matchmakingQueue`, `activeDebates`). Access is instantaneous (<0.001ms), but data is lost if Node.js restarts and cannot be shared across 2+ server instances.
+3. **Redis Server (Cloud / Infrastructure):** Runs as an independent backend database server. It is **shared across all server nodes and accessible to all users**, while operating at near-RAM speed (<1ms).
 
 ---
 
-## 4. Understanding `REDIS_URL`
+## 4. What is `REDIS_URL`?
 
-`REDIS_URL` is the connection string (URI) that tells `ioredis` how to connect to the Redis server over TCP.
+`REDIS_URL` is the URI connection string (address + port + credentials) that allows your Node.js Express server to establish a secure TCP network pipeline to your Redis server.
 
 ```
 redis://default:MySecretPassword123@redis-12345.c1.us-east-1.ec2.redns.redis-cloud.com:12345
@@ -136,335 +127,421 @@ redis://default:MySecretPassword123@redis-12345.c1.us-east-1.ec2.redns.redis-clo
 * **`redis-12345...com`**: The public hostname or IP address of the Redis cloud instance.
 * **`12345`**: The TCP port (default for Redis is `6379`, but cloud providers assign custom ports).
 
-In MindClash, `process.env.REDIS_URL` is stored inside `server/.env` and excluded from Git via `.gitignore` to prevent credential leaks.
-
 ---
 
 ## 5. Top 5 Real-World Features of Redis in Production
 
-Redis is not just a cache. It supports 5 major architectural patterns in modern systems:
-
-### 1️⃣ Response Caching (Implemented in MindClash)
-Caches expensive DB queries (like global leaderboards) in Redis RAM with a TTL (Time-To-Live). Cuts database read load by ~80%.
-
-### 2️⃣ API Rate Limiting (Spam & Brute-Force Protection)
-Tracks request counts per IP within a sliding time window using Redis atomic counters (`INCR` + `EXPIRE`). If IP `192.168.1.1` sends >5 requests to `/api/auth/login` within 60 seconds, HTTP 429 is returned.
-
-### 3️⃣ Session Management (Session Store)
-In traditional session-based auth (non-JWT), session cookies store a session ID on the client, and the actual session object `{ userId, role }` is stored in Redis. Any backend node can verify the session instantly.
-
-### 4️⃣ Real-Time Scoreboards via Sorted Sets (`ZADD` / `ZREVRANGE`)
-Redis has native data structures like **Sorted Sets**. Scores are automatically kept sorted in O(log N) logarithmic time:
-```bash
-ZADD leaderboard 1500 "arpit"
-ZADD leaderboard 1200 "rahul"
-ZREVRANGE leaderboard 0 9 WITHSCORES  # Returns top 10 ranked debaters instantly
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                           5 CORE USES OF REDIS                              │
+│                                                                             │
+│  1. Response Caching        👉 Used in MindClash (Leaderboard & Topics)      │
+│  2. API Rate Limiting       👉 Block IP spam & brute-force login attacks    │
+│  3. Session Storage         👉 Store user cookies across multiple servers   │
+│  4. Sorted Sets (ZADD)      👉 Real-time live scoreboards                   │
+│  5. Pub/Sub Messaging       👉 Sync WebSocket events across 2+ server nodes │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 5️⃣ Cross-Server Real-Time Event Syncing (Redis Pub/Sub)
-When scaling Socket.io horizontally to 2+ backend server nodes behind a load balancer, Socket.io uses Redis Pub/Sub (`@socket.io/redis-adapter`) to fan out room messages to all server instances.
+---
+
+## 6. Heavily Commented Code Breakdown — Every Line Explained
+
+Below is the complete, heavily commented source code for every file where Redis is implemented in MindClash.
 
 ---
 
-## 6. Complete Codebase Walkthrough: Every Line Explained
-
-Let's dissect every line of Redis code in the MindClash codebase.
-
----
-
-### 6.1 `server/config/redis.js` — Connection & Core Helpers
-
-This file initializes the `ioredis` instance and exports 3 safe wrapper functions.
+### 6.1 `server/config/redis.js` (Connection & Wrapper Functions)
 
 ```javascript
- 1: import Redis from 'ioredis';
- 2: 
- 3: let redis = null;
- 4: 
- 5: const connectRedis = () => {
- 6:     try {
- 7:         if (process.env.REDIS_URL) {
- 8:             redis = new Redis(process.env.REDIS_URL, {
- 9:                 maxRetriesPerRequest: 3,
-10:                 retryDelayOnFailover: 100,
-11:                 lazyConnect: true,
-12:             });
-13: 
-14:             redis.on('connect', () => {
-15:                 console.log('✅ Redis Connected');
-16:             });
-17: 
-18:             redis.on('error', (err) => {
-19:                 console.error('❌ Redis Error:', err.message);
-20:             });
-21: 
-22:             redis.connect().catch(console.error);
-23:         } else {
-24:             console.log('⚠️ Redis URL not configured, using in-memory fallback');
-25:         }
-26:     } catch (error) {
-27:         console.error('❌ Redis Connection Error:', error.message);
-28:     }
-29: 
-30:     return redis;
-31: };
-```
+// Step 1: Import the ioredis package (the standard, high-performance Node.js Redis client driver)
+import Redis from 'ioredis';
 
-#### Line-by-Line Breakdown (Connection):
-* **Line 1:** Imports `Redis` from `ioredis`. `ioredis` is the full-featured, performance-focused Node.js client supporting promises, cluster mode, and automatic reconnection.
-* **Line 3:** `let redis = null;` — Module-scoped variable. Initialized as `null`. If `REDIS_URL` is omitted from `.env`, it remains `null`, enabling seamless fallback.
-* **Line 5-7:** `connectRedis()` checks `if (process.env.REDIS_URL)` before attempting initialization.
-* **Line 8-12:** Instantiates `new Redis(...)` with configuration options:
-  * `maxRetriesPerRequest: 3`: If a command stalls due to network hiccup, it retries 3 times before rejecting the promise.
-  * `retryDelayOnFailover: 100`: Waits 100ms between failover retries.
-  * `lazyConnect: true`: Defers establishing the TCP connection until `.connect()` is called explicitly on line 22. This prevents unhandled startup exceptions if the Redis host is temporarily unreachable.
-* **Line 14-20:** Sets up event handlers (`connect` and `error`) to print operational status to the terminal.
-* **Line 22:** Calls `redis.connect()` asynchronously. `.catch(console.error)` handles connection failures gracefully without crashing Node.js.
-* **Line 24:** Logs `⚠️ Redis URL not configured...` if `REDIS_URL` is absent, confirming graceful fallback mode is active.
+// Step 2: Declare a module-scoped singleton variable 'redis', initialized to null.
+// If REDIS_URL is not set in .env, this remains null so helper functions know to fallback to MongoDB.
+let redis = null;
+
+/**
+ * Connects Express server to Redis Cloud instance
+ * @returns {object|null} The ioredis client instance or null if unconfigured
+ */
+const connectRedis = () => {
+    try {
+        // Step 3: Check if the REDIS_URL environment variable is provided in server/.env
+        if (process.env.REDIS_URL) {
+            
+            // Step 4: Instantiate new ioredis client with explicit connection options
+            redis = new Redis(process.env.REDIS_URL, {
+                maxRetriesPerRequest: 3,      // If a command stalls/fails, retry up to 3 times before throwing error
+                retryDelayOnFailover: 100,    // Wait 100 milliseconds between retry attempts during failovers
+                lazyConnect: true,            // DEFER TCP connection until .connect() is explicitly called below
+            });
+
+            // Step 5: Event Listener — Triggers when TCP connection to Redis succeeds
+            redis.on('connect', () => {
+                console.log('✅ Redis Connected');
+            });
+
+            // Step 6: Event Listener — Triggers if Redis connection encounters an error or network drop
+            redis.on('error', (err) => {
+                console.error('❌ Redis Error:', err.message);
+            });
+
+            // Step 7: Initiate the asynchronous TCP connection to Redis Cloud and catch startup errors
+            redis.connect().catch(console.error);
+
+        } else {
+            // Step 8: Log a friendly warning if REDIS_URL is omitted. The server continues running smoothly using MongoDB.
+            console.log('⚠️ Redis URL not configured, using in-memory fallback');
+        }
+    } catch (error) {
+        // Step 9: Catch any synchronous initialization errors during setup
+        console.error('❌ Redis Connection Error:', error.message);
+    }
+
+    // Step 10: Return the initialized client (or null)
+    return redis;
+};
+
+/**
+ * Safely reads and parses a JSON value from Redis RAM
+ * @param {string} key - The cache key to lookup (e.g. 'leaderboard:global:1:50')
+ * @returns {Promise<object|null>} The parsed JSON object if hit, or null if miss/error/unconfigured
+ */
+export const getCache = async (key) => {
+    // Safety Check 1: If Redis is unconfigured or null, return null immediately (triggers MongoDB query)
+    if (!redis) return null;
+
+    try {
+        // Step 11: Execute Redis GET command. Returns raw JSON string if key exists, or null if expired/missing
+        const data = await redis.get(key);
+
+        // Step 12: Deserialization — Redis only stores strings. Convert raw string back into a JS object.
+        return data ? JSON.parse(data) : null;
+
+    } catch (err) {
+        // Safety Check 2: If a network hiccup occurs, log error and return null. App falls back gracefully to MongoDB!
+        console.error('Redis getCache error:', err.message);
+        return null;
+    }
+};
+
+/**
+ * Safely stringifies and saves a JSON object to Redis RAM with expiration (TTL)
+ * @param {string} key - The cache key to set
+ * @param {object} value - The JavaScript object/payload to store
+ * @param {number} ttlSeconds - Time-To-Live in seconds (default: 300s / 5 mins)
+ */
+export const setCache = async (key, value, ttlSeconds = 300) => {
+    // Safety Check 1: If Redis is unconfigured or null, exit function silently
+    if (!redis) return;
+
+    try {
+        // Step 13: Execute Redis SET command with Expiration
+        //  - key: The unique identifier string
+        //  - JSON.stringify(value): Serializes JS object into a string for storage
+        //  - 'EX': Redis flag instructing Redis to EXpire the key
+        //  - ttlSeconds: Number of seconds before Redis auto-deletes the key from RAM
+        await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds);
+
+    } catch (err) {
+        // Safety Check 2: If write fails, log error silently. The response was already calculated and returned to user!
+        console.error('Redis setCache error:', err.message);
+    }
+};
+
+/**
+ * Manually invalidates and removes a cache key from Redis RAM
+ * @param {string} key - The cache key to delete
+ */
+export const delCache = async (key) => {
+    // Safety Check 1: If Redis is unconfigured, exit silently
+    if (!redis) return;
+
+    try {
+        // Step 14: Execute Redis DEL command to purge key immediately
+        await redis.del(key);
+    } catch (err) {
+        console.error('Redis delCache error:', err.message);
+    }
+};
+
+// Export redis instance and boot function
+export { redis, connectRedis };
+```
 
 ---
 
-### 6.2 Helper 1: `getCache(key)` — Safe Read
+### 6.2 `server/index.js` (Server Boot Sequence)
 
 ```javascript
-36: export const getCache = async (key) => {
-37:     if (!redis) return null;
-38:     try {
-39:         const data = await redis.get(key);
-40:         return data ? JSON.parse(data) : null;
-41:     } catch (err) {
-42:         console.error('Redis getCache error:', err.message);
-43:         return null;
-44:     }
-45: };
-```
+// Step 1: Import the connectRedis initializer function from our configuration module
+import { connectRedis } from './config/redis.js';
 
-#### Line-by-Line Breakdown:
-* **Line 37:** `if (!redis) return null;` — **Safety Guard 1:** If Redis was never connected, immediately returns `null`. The route controller sees `null` (cache miss) and fetches from MongoDB normally.
-* **Line 39:** `const data = await redis.get(key);` — Issues the Redis `GET` command over TCP. Redis searches its RAM hash table for `key`. Returns raw string if found, `null` if missing or expired.
-* **Line 40:** `return data ? JSON.parse(data) : null;` — Redis only stores strings/binary. `JSON.parse(data)` deserializes the string back into a JavaScript object (`{ success: true, leaderboard: [...] }`).
-* **Line 41-44:** **Safety Guard 2:** If Redis throws a network timeout or connection error, `catch` logs the error and returns `null`. **The user request never fails.**
+// ... Express setup, Helmet, CORS, Morgan middleware ...
+
+// Step 2: Execute connectRedis() during Express server boot sequence
+// This opens the TCP network connection to Redis Cloud in parallel with MongoDB (connectDB())
+connectRedis();
+
+// ... Route mounting and httpServer.listen(5000) ...
+```
 
 ---
 
-### 6.3 Helper 2: `setCache(key, value, ttlSeconds)` — Safe Write with TTL
+### 6.3 `server/routes/leaderboardRoutes.js` (Global & Weekly Leaderboard Caching)
 
 ```javascript
-50: export const setCache = async (key, value, ttlSeconds = 300) => {
-51:     if (!redis) return;
-52:     try {
-53:         await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds);
-54:     } catch (err) {
-55:         console.error('Redis setCache error:', err.message);
-56:     }
-57: };
-```
+import express from 'express';
+import User from '../models/User.js';
 
-#### Line-by-Line Breakdown:
-* **Line 51:** `if (!redis) return;` — Guard clause. If Redis is disabled, silently exits.
-* **Line 53:** `await redis.set(key, JSON.stringify(value), 'EX', ttlSeconds);`
-  * `JSON.stringify(value)`: Converts the JavaScript response object into a string for storage.
-  * `'EX'`: Tells Redis to set an explicit **EXpiration time** in seconds.
-  * `ttlSeconds`: The Time-To-Live duration (defaults to 300 seconds = 5 minutes). After 300 seconds, Redis automatically purges the key from RAM.
-* **Line 54-56:** Wraps write in `try/catch` so a Redis write failure never prevents the HTTP response from reaching the client.
+// Step 1: Import safe cache wrapper helpers from redis.js
+import { getCache, setCache } from '../config/redis.js';
+
+const router = express.Router();
+
+/**
+ * @route   GET /api/leaderboard/global
+ * @desc    Get global leaderboard (Ranked by reputation & wins)
+ * @access  Public
+ */
+router.get('/global', async (req, res) => {
+    try {
+        // Step 2: Parse pagination arguments from URL query parameters (e.g. ?page=1&limit=50)
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 50;
+
+        // Step 3: Construct a dynamic namespace key (e.g. 'leaderboard:global:1:50')
+        // Using colons 'entity:aspect:id' is a standard Redis key naming convention
+        const cacheKey = `leaderboard:global:${page}:${limit}`;
+
+        // ─── STEP 4: CHECK REDIS CACHE FIRST (CACHE HIT CHECK) ───────────────────────
+        const cachedData = await getCache(cacheKey);
+        
+        if (cachedData) {
+            // CACHE HIT! Return JSON directly from Redis RAM in <1ms.
+            // MongoDB queries on lines 5-9 below are COMPLETELY SKIPPED!
+            return res.json(cachedData);
+        }
+
+        // ─── STEP 5: CACHE MISS → QUERY MONGODB DATABASE ─────────────────────────────
+        const skip = (page - 1) * limit;
+
+        // Expensive MongoDB query: Scans User collection, sorts by reputation & wins
+        const users = await User.find({ totalDebates: { $gt: 0 } })
+            .sort({ reputation: -1, wins: -1 })
+            .skip(skip)
+            .limit(limit)
+            .select('username displayName avatar frame tier level reputation xp wins losses totalDebates bestStreak');
+
+        // Count total qualifying users for pagination metadata
+        const total = await User.countDocuments({ totalDebates: { $gt: 0 } });
+
+        // Format rankings and calculate win percentage
+        const rankedUsers = users.map((user, index) => ({
+            rank: skip + index + 1,
+            ...user.toObject(),
+            winRate: user.totalDebates > 0 ? Math.round((user.wins / user.totalDebates) * 100) : 0,
+        }));
+
+        // Construct final payload object
+        const responseData = {
+            success: true,
+            leaderboard: rankedUsers,
+            pagination: {
+                currentPage: page,
+                totalPages: Math.ceil(total / limit),
+                totalUsers: total,
+            },
+        };
+
+        // ─── STEP 6: STORE RESPONSE IN REDIS RAM FOR NEXT 5 MINUTES ──────────────────
+        // Key: 'leaderboard:global:1:50', Payload: responseData, TTL: 300 seconds (5 mins)
+        await setCache(cacheKey, responseData, 300);
+
+        // ─── STEP 7: RETURN FRESH RESPONSE TO CURRENT USER ───────────────────────────
+        res.json(responseData);
+
+    } catch (error) {
+        console.error('Get leaderboard error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+/**
+ * @route   GET /api/leaderboard/weekly
+ * @desc    Get weekly leaderboard (Active in last 7 days)
+ * @access  Public
+ */
+router.get('/weekly', async (req, res) => {
+    try {
+        // Step 8: Static key for weekly leaderboard
+        const cacheKey = 'leaderboard:weekly';
+
+        // Step 9: Check Redis RAM cache
+        const cachedData = await getCache(cacheKey);
+        if (cachedData) {
+            // CACHE HIT → Return cached JSON in <1ms
+            return res.json(cachedData);
+        }
+
+        // Step 10: CACHE MISS → Query MongoDB for users active in last 7 days
+        const oneWeekAgo = new Date();
+        oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+
+        const users = await User.find({
+            totalDebates: { $gt: 0 },
+            lastLogin: { $gte: oneWeekAgo }
+        })
+            .sort({ wins: -1, reputation: -1 })
+            .limit(50)
+            .select('username displayName avatar tier level reputation wins losses totalDebates');
+
+        const rankedUsers = users.map((user, index) => ({
+            rank: index + 1,
+            ...user.toObject(),
+            winRate: user.totalDebates > 0 ? Math.round((user.wins / user.totalDebates) * 100) : 0,
+        }));
+
+        const responseData = {
+            success: true,
+            leaderboard: rankedUsers,
+            period: 'weekly',
+        };
+
+        // Step 11: Cache result in Redis for 5 minutes (300 seconds)
+        await setCache(cacheKey, responseData, 300);
+
+        // Step 12: Return response
+        res.json(responseData);
+
+    } catch (error) {
+        console.error('Get weekly leaderboard error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+export default router;
+```
 
 ---
 
-### 6.4 Helper 3: `delCache(key)` — Safe Cache Invalidation
+### 6.4 `server/routes/topicRoutes.js` (Trending & Featured Topics Caching)
 
 ```javascript
-62: export const delCache = async (key) => {
-63:     if (!redis) return;
-64:     try {
-65:         await redis.del(key);
-66:     } catch (err) {
-67:         console.error('Redis delCache error:', err.message);
-68:     }
-69: };
-```
+import express from 'express';
+import Topic from '../models/Topic.js';
 
-#### Line-by-Line Breakdown:
-* **Line 65:** Executes `redis.del(key)`. Removes the key from Redis RAM immediately. Used when underlying MongoDB data is updated and the cache must be purged ahead of TTL expiration.
+// Step 1: Import Redis cache wrapper helpers
+import { getCache, setCache } from '../config/redis.js';
+
+const router = express.Router();
+
+/**
+ * @route   GET /api/topics/trending
+ * @desc    Get top 10 trending topics
+ * @access  Public
+ */
+router.get('/trending', async (req, res) => {
+    try {
+        // Step 2: Define static cache key
+        const cacheKey = 'topics:trending';
+
+        // Step 3: Check Redis RAM cache
+        const cached = await getCache(cacheKey);
+        if (cached) {
+            // CACHE HIT → Return immediately (<1ms)
+            return res.json(cached);
+        }
+
+        // Step 4: CACHE MISS → Fetch trending topics from MongoDB
+        const topics = await Topic.getTrending(10);
+        const responseData = { success: true, topics };
+
+        // Step 5: Save in Redis RAM with 10-Minute TTL (600 seconds)
+        // Trending topics change slowly, so 10 minutes is an optimal cache lifetime
+        await setCache(cacheKey, responseData, 600);
+
+        // Step 6: Return response
+        res.json(responseData);
+
+    } catch (error) {
+        console.error('Get trending error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+/**
+ * @route   GET /api/topics/featured
+ * @desc    Get featured topic of the day
+ * @access  Public
+ */
+router.get('/featured', async (req, res) => {
+    try {
+        // Step 7: Define static cache key
+        const cacheKey = 'topics:featured';
+
+        // Step 8: Check Redis RAM cache
+        const cached = await getCache(cacheKey);
+        if (cached) {
+            // CACHE HIT → Return immediately (<1ms)
+            return res.json(cached);
+        }
+
+        // Step 9: CACHE MISS → Find featured topic document in MongoDB
+        const featured = await Topic.findOne({
+            isFeatured: true,
+            isActive: true,
+        }).sort({ featuredAt: -1 });
+
+        const responseData = { success: true, topic: featured };
+
+        // Step 10: Save in Redis RAM with 1-Hour TTL (3600 seconds)
+        // Featured topics update only once per day, making 1 hour a safe TTL
+        await setCache(cacheKey, responseData, 3600);
+
+        // Step 11: Return response
+        res.json(responseData);
+
+    } catch (error) {
+        console.error('Get featured error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+});
+
+export default router;
+```
 
 ---
 
-### 6.5 `server/index.js` — Boot Hook
+## 7. Master Summary Table: All Redis Code in MindClash
 
-```javascript
-14: import { connectRedis } from './config/redis.js';
-...
-56: connectRedis();
-```
-
-* **Line 14:** Imports `connectRedis`.
-* **Line 56:** Calls `connectRedis()` during main Express boot, connecting to Redis in parallel with MongoDB (`connectDB()`).
-
----
-
-### 6.6 `server/routes/leaderboardRoutes.js` — Global & Weekly Leaderboard
-
-```javascript
- 1: import express from 'express';
- 2: import User from '../models/User.js';
- 3: import { getCache, setCache } from '../config/redis.js';
- 4: 
- 5: const router = express.Router();
- 6: 
- 7: /**
- 8:  * @route   GET /api/leaderboard/global
- 9:  * @desc    Get global leaderboard
-10:  * @access  Public
-11:  */
-12: router.get('/global', async (req, res) => {
-13:     try {
-14:         const page = parseInt(req.query.page) || 1;
-15:         const limit = parseInt(req.query.limit) || 50;
-16:         const cacheKey = `leaderboard:global:${page}:${limit}`;
-17: 
-18:         // Step 1: Check Redis cache first
-19:         const cachedData = await getCache(cacheKey);
-20:         if (cachedData) {
-21:             return res.json(cachedData);
-22:         }
-23: 
-24:         // Step 2: Cache miss → Query MongoDB
-25:         const skip = (page - 1) * limit;
-26:         const users = await User.find({ totalDebates: { $gt: 0 } })
-27:             .sort({ reputation: -1, wins: -1 })
-28:             .skip(skip)
-29:             .limit(limit)
-30:             .select('username displayName avatar frame tier level reputation xp wins losses totalDebates bestStreak');
-31: 
-32:         const total = await User.countDocuments({ totalDebates: { $gt: 0 } });
-33: 
-34:         const rankedUsers = users.map((user, index) => ({
-35:             rank: skip + index + 1,
-36:             ...user.toObject(),
-37:             winRate: user.totalDebates > 0 ? Math.round((user.wins / user.totalDebates) * 100) : 0,
-38:         }));
-39: 
-40:         const responseData = {
-41:             success: true,
-42:             leaderboard: rankedUsers,
-43:             pagination: {
-44:                 currentPage: page,
-45:                 totalPages: Math.ceil(total / limit),
-46:                 totalUsers: total,
-47:             },
-48:         };
-49: 
-50:         // Step 3: Save to Redis for 5 minutes (300 seconds)
-51:         await setCache(cacheKey, responseData, 300);
-52: 
-53:         // Step 4: Return response
-54:         res.json(responseData);
-55:     } catch (error) {
-56:         console.error('Get leaderboard error:', error);
-57:         res.status(500).json({ success: false, message: 'Server error' });
-58:     }
-59: });
-```
-
-#### Line-by-Line Walkthrough (`/global`):
-* **Line 14-15:** Extracts pagination arguments from `req.query`, defaulting to page 1, 50 items per page.
-* **Line 16:** Constructs dynamic key `leaderboard:global:1:50`. Namespacing keys with colons (`entity:aspect:id`) is a Redis best practice.
-* **Line 19:** `await getCache(cacheKey)` checks Redis RAM.
-* **Line 20-22:** **Cache Hit Branch:** If `cachedData` is not null, `res.json(cachedData)` sends the response immediately. Lines 24-52 **never execute**. Response time is **<1ms**.
-* **Line 24-48:** **Cache Miss Branch:** Executes MongoDB `User.find()`, sorts by reputation, counts documents, and formats `responseData`.
-* **Line 51:** `await setCache(cacheKey, responseData, 300);` — Caches the structured response object in Redis RAM for 300 seconds (5 minutes).
-* **Line 54:** Sends fresh response to client.
-
----
-
-### 6.7 `server/routes/topicRoutes.js` — Trending & Featured Topics
-
-```javascript
-41: router.get('/trending', async (req, res) => {
-42:     try {
-43:         const cacheKey = 'topics:trending';
-44:         const cached = await getCache(cacheKey);
-45:         if (cached) return res.json(cached);
-46: 
-47:         const topics = await Topic.getTrending(10);
-48:         const responseData = { success: true, topics };
-49: 
-50:         // Cache for 10 minutes (600s)
-51:         await setCache(cacheKey, responseData, 600);
-52: 
-53:         res.json(responseData);
-54:     } catch (error) { ... }
-55: });
-```
-
-```javascript
-65: router.get('/featured', async (req, res) => {
-66:     try {
-67:         const cacheKey = 'topics:featured';
-68:         const cached = await getCache(cacheKey);
-69:         if (cached) return res.json(cached);
-70: 
-71:         const featured = await Topic.findOne({ isFeatured: true, isActive: true }).sort({ featuredAt: -1 });
-72:         const responseData = { success: true, topic: featured };
-73: 
-74:         // Cache for 1 hour (3600s)
-75:         await setCache(cacheKey, responseData, 3600);
-76: 
-77:         res.json(responseData);
-78:     } catch (error) { ... }
-79: });
-```
-
-#### Walkthrough (`/trending` & `/featured`):
-* `GET /api/topics/trending`: Uses key `topics:trending` with a **600-second (10-minute) TTL**.
-* `GET /api/topics/featured`: Uses key `topics:featured` with a **3600-second (1-hour) TTL** since the featured topic of the day is updated only once every 24 hours.
-
----
-
-## 7. Graceful Degradation & Resilience Architecture
-
-Every Redis operation is designed so that a database/network error in Redis **never breaks the user experience**:
-
-```
-                  ┌───────────────────────────────┐
-                  │   Incoming HTTP GET Request   │
-                  └───────────────┬───────────────┘
-                                  │
-                                  ▼
-                  ┌───────────────────────────────┐
-                  │    getCache(key) Execution    │
-                  └───────────────┬───────────────┘
-                                  │
-                 ┌────────────────┴────────────────┐
-                 │                                 │
-                 ▼                                 ▼
-      [ Redis Is Healthy ]               [ Redis Is Down / Error ]
-                 │                                 │
-        ┌────────┴────────┐                        │
-        ▼                 ▼                        │
-    Cache HIT        Cache MISS                    │
-        │                 │                        │
-        │                 └──────────────┐         │
-        ▼                                ▼         ▼
-Return JSON (<1ms)             Execute MongoDB Query (50-200ms)
-                                                 │
-                                                 ▼
-                                     Return JSON to Client
-```
+| File Path | Function / Route | Redis Command | Key Format | TTL | Purpose |
+|---|---|---|---|---|---|
+| [`server/config/redis.js`](file:///e:/Projects/Mindclash-main/server/config/redis.js) | `connectRedis()` | `new Redis(URL)` | — | — | Initializes connection to Redis Cloud |
+| [`server/config/redis.js`](file:///e:/Projects/Mindclash-main/server/config/redis.js) | `getCache(key)` | `redis.get(key)` | Dynamic | — | Safe read helper (`JSON.parse`) |
+| [`server/config/redis.js`](file:///e:/Projects/Mindclash-main/server/config/redis.js) | `setCache(key, val, ttl)` | `redis.set(k, v, 'EX', ttl)` | Dynamic | Custom | Safe write helper (`JSON.stringify`) |
+| [`server/config/redis.js`](file:///e:/Projects/Mindclash-main/server/config/redis.js) | `delCache(key)` | `redis.del(key)` | Dynamic | — | Safe purge helper |
+| [`server/index.js`](file:///e:/Projects/Mindclash-main/server/index.js) | Server boot | `connectRedis()` | — | — | Connects Redis during startup |
+| [`server/routes/leaderboardRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/leaderboardRoutes.js) | `GET /api/leaderboard/global` | `getCache` / `setCache` | `leaderboard:global:{page}:{limit}` | 300s (5m) | Caches global user rankings |
+| [`server/routes/leaderboardRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/leaderboardRoutes.js) | `GET /api/leaderboard/weekly` | `getCache` / `setCache` | `leaderboard:weekly` | 300s (5m) | Caches weekly active rankings |
+| [`server/routes/topicRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/topicRoutes.js) | `GET /api/topics/trending` | `getCache` / `setCache` | `topics:trending` | 600s (10m) | Caches top 10 trending topics |
+| [`server/routes/topicRoutes.js`](file:///e:/Projects/Mindclash-main/server/routes/topicRoutes.js) | `GET /api/topics/featured` | `getCache` / `setCache` | `topics:featured` | 3600s (1h) | Caches topic of the day |
 
 ---
 
 ## 8. Master Skeleton System Architecture Diagram
 
-This end-to-end skeleton diagram illustrates how React, Express, Node.js Memory, Redis, MongoDB, and WebSockets interact across the entire application:
+This diagram shows how React, Express, Node.js RAM, Redis, MongoDB, and WebSockets interact across all 4 system tiers:
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────────────────────────────┐
 │                                   TIER 1: PRESENTATION LAYER (BROWSER)                                 │
 │                                                                                                        │
 │   React 18 SPA (Vercel CDN)                                                                            │
-│   - AuthContext (JWT in localStorage)                                                                  │
+│   - AuthContext (JWT stored in localStorage)                                                           │
 │   - React Router (/arena, /debate/:id, /leaderboard)                                                   │
-│   - Axios (REST API calls)                                                                             │
+│   - Axios (HTTP REST API Client)                                                                       │
 │   - Socket.io Client (Real-time duplex connection)                                                     │
 └───────────────────────────────────┬───────────────────────────────────┬────────────────────────────────┘
                                     │                                   │
@@ -506,12 +583,21 @@ This end-to-end skeleton diagram illustrates how React, Express, Node.js Memory,
 ## 9. Interview Q&A Bank
 
 **Q: Walk me through the exact line execution when a user requests `GET /api/leaderboard/global` for the first time vs the second time.**
-> **First Request (Cache Miss):** Line 16 constructs key `leaderboard:global:1:50`. Line 19 calls `getCache()`, executing `redis.get()`. Key does not exist, so `getCache()` returns `null`. `if (cachedData)` evaluates to `false`. Lines 25-49 execute MongoDB `User.find()`, sort documents, and format `responseData`. Line 52 calls `setCache()`, stringifying `responseData` and writing it to Redis RAM with `TTL: 300s`. Line 54 returns JSON to client (~150ms total).
+> **First Request (Cache Miss):**
+> 1. Line 16 constructs key `leaderboard:global:1:50`.
+> 2. Line 19 calls `getCache()`, executing `redis.get('leaderboard:global:1:50')`.
+> 3. Key does not exist in Redis, so `getCache()` returns `null`. `if (cachedData)` evaluates to `false`.
+> 4. Lines 25-48 execute the heavy MongoDB `User.find()` query, sort documents, and format `responseData`.
+> 5. Line 51 calls `setCache()`, stringifying `responseData` and writing it to Redis RAM with `TTL: 300s`.
+> 6. Line 54 returns JSON to client (~150ms total).
 >
-> **Second Request (Cache Hit):** Line 16 constructs key `leaderboard:global:1:50`. Line 19 calls `getCache()`. Key exists in Redis RAM! `getCache()` returns the `JSON.parse()` object. Line 20 `if (cachedData)` evaluates to `true`. Line 21 returns `res.json(cachedData)` immediately. Lines 24-54 are **never reached**. MongoDB is not queried. Response arrives in **<1ms**.
-
-**Q: Why use an in-memory Node.js RAM `Map` for matchmaking instead of Redis Queues?**
-> Node.js process RAM access takes nanoseconds (<0.001ms) with zero network overhead. Since MindClash currently runs on a single server instance, process memory is strictly faster. Redis queues or Pub/Sub become relevant when scaling across multiple backend nodes.
+> **Second Request (Cache Hit within 5 minutes):**
+> 1. Line 16 constructs key `leaderboard:global:1:50`.
+> 2. Line 19 calls `getCache()`, executing `redis.get('leaderboard:global:1:50')`.
+> 3. Key exists in Redis RAM! `getCache()` returns the `JSON.parse()` object.
+> 4. Line 20 `if (cachedData)` evaluates to `true`.
+> 5. Line 21 returns `res.json(cachedData)` immediately.
+> 6. Lines 24-54 are **never reached**. MongoDB is not queried. Response arrives in **<1ms**.
 
 **Q: What happens if your Redis Cloud instance experiences an outage?**
 > The application uses a Graceful Degradation pattern. All Redis helper functions wrap commands in `try/catch` blocks and check `if (!redis)`. If Redis is unconfigured or throws a network error, `getCache()` returns `null`, causing Express routes to fall through safely to MongoDB. Users experience normal database response times with zero crashes.
