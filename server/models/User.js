@@ -83,7 +83,15 @@ const userSchema = new mongoose.Schema({
         type: Number,
         default: 0,
     },
+    weeklyDebates: {
+        type: Number,
+        default: 0,
+    },
     wins: {
+        type: Number,
+        default: 0,
+    },
+    weeklyWins: {
         type: Number,
         default: 0,
     },
@@ -260,6 +268,10 @@ userSchema.statics.generateAnonymousAlias = function () {
     const num = Math.floor(Math.random() * 1000);
     return `${adj}${noun}_${num}`;
 };
+
+// Indexes for high-performance leaderboard queries
+userSchema.index({ reputation: -1, wins: -1 });
+userSchema.index({ weeklyWins: -1, reputation: -1 });
 
 const User = mongoose.model('User', userSchema);
 

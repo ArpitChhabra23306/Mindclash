@@ -76,21 +76,18 @@ router.get('/weekly', async (req, res) => {
             return res.json(cachedData);
         }
 
-        const oneWeekAgo = new Date();
-        oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
-
+        // Fetch users who have engaged in debates during the current week, sorted by weekly wins
         const users = await User.find({
-            totalDebates: { $gt: 0 },
-            lastLogin: { $gte: oneWeekAgo }
+            weeklyDebates: { $gt: 0 },
         })
-            .sort({ wins: -1, reputation: -1 })
+            .sort({ weeklyWins: -1, reputation: -1 })
             .limit(50)
-            .select('username displayName avatar tier level reputation wins losses totalDebates');
+            .select('username displayName avatar frame tier level reputation xp wins weeklyWins losses totalDebates weeklyDebates bestStreak');
 
         const rankedUsers = users.map((user, index) => ({
             rank: index + 1,
             ...user.toObject(),
-            winRate: user.totalDebates > 0 ? Math.round((user.wins / user.totalDebates) * 100) : 0,
+            winRate: user.weeklyDebates > 0 ? Math.round((user.weeklyWins / user.weeklyDebates) * 100) : 0,
         }));
 
         const responseData = {
@@ -99,7 +96,7 @@ router.get('/weekly', async (req, res) => {
             period: 'weekly',
         };
 
-        // Cache in Redis for 5 minutes
+        // Cache in Redis for 5 minutes (300 seconds)
         await setCache(cacheKey, responseData, 300);
 
         res.json(responseData);

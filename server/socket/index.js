@@ -678,19 +678,19 @@ async function distributeXP(debate, winnerSide, xpWin, xpLose, xpDraw) {
 
         for (const p of winners) {
             await User.findByIdAndUpdate(p.user, {
-                $inc: { xp: xpWin, reputation: 10, wins: 1, totalDebates: 1, winStreak: 1 },
+                $inc: { xp: xpWin, reputation: 10, wins: 1, weeklyWins: 1, totalDebates: 1, weeklyDebates: 1, winStreak: 1 },
             });
         }
         for (const p of losers) {
             await User.findByIdAndUpdate(p.user, {
-                $inc: { xp: xpLose, losses: 1, totalDebates: 1 },
+                $inc: { xp: xpLose, losses: 1, totalDebates: 1, weeklyDebates: 1 },
                 $set: { winStreak: 0 },
             });
         }
     } else {
         for (const p of [...debate.proTeam, ...debate.conTeam]) {
             await User.findByIdAndUpdate(p.user, {
-                $inc: { xp: xpDraw, draws: 1, totalDebates: 1 },
+                $inc: { xp: xpDraw, draws: 1, totalDebates: 1, weeklyDebates: 1 },
             });
         }
     }
