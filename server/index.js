@@ -9,9 +9,10 @@ import dotenv from 'dotenv';
 // Load environment variables first
 dotenv.config();
 
-// Import configurations
+// Import configurations & services
 import connectDB from './config/db.js';
 import { connectRedis } from './config/redis.js';
+import { initCronJobs } from './services/cronService.js';
 
 // Import routes
 import authRoutes        from './routes/authRoutes.js';
@@ -55,9 +56,10 @@ const io = new Server(httpServer, {
     pingInterval: 25000,
 });
 
-// Connect databases
+// Connect databases & background services
 connectDB();
 connectRedis();
+initCronJobs();
 
 // ─── Middleware ───────────────────────────────────────────────────────────────
 app.use(helmet());
